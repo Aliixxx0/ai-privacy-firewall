@@ -1,6 +1,6 @@
-import { ChatGPT } from '@/providers/chatgpt';
-import { Claude } from '@/providers/claude';
-import { detectSecrets, sanitize } from '@/engine/patterns';
+import { ChatGPT } from '~src/providers/chatgpt';
+import { Claude } from '~src/providers/claude';
+import { detectSecrets, sanitize } from '~src/engine/patterns';
 
 class PrivacyGateway {
   private provider: any = null;

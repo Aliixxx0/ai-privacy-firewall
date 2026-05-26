@@ -24,15 +24,14 @@
     "prettier": "3.2.4",
     "typescript": "5.3.3"
   },
-  "manifest": {
-    "host_permissions": ["https://chat.openai.com/*", "https://chatgpt.com/*", "https://claude.ai/*", "https://gemini.google.com/*", "https://*/*"],
-    "permissions": ["activeTab", "storage"],
-    "content_scripts": [...],
-    "web_accessible_resources": [
-      {
-        "resources": ["detector.worker.js"],
-        "matches": ["<all_urls>"]
-      }
-    ]
-  }
+"manifest": {
+  "host_permissions": [
+    "https://chat.openai.com/*",
+    "https://chatgpt.com/*",
+    "https://claude.ai/*",
+    "https://gemini.google.com/*",
+    "https://*/*"
+  ],
+  "permissions": ["activeTab", "storage"]
+}
 }
