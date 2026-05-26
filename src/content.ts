@@ -6,12 +6,50 @@ class PrivacyGateway {
   private provider: any = null;
   private originalTextarea: HTMLTextAreaElement | null = null;
   private detectionWorker: Worker | null = null;
-  
+  private enabled = true;
+  private detectionCount = 0;
+
   constructor() {
     this.detectProvider();
     this.setupWorker();
-    this.injectOverlay();
+    this.setupMessageListener();
+    if (this.enabled) {
+      this.injectOverlay();
+    }
     this.interceptSend();
+  }
+
+  setupMessageListener() {
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message.type === 'GET_STATUS') {
+        sendResponse({
+          provider: this.provider?.name ?? 'Unknown',
+          detections: this.detectionCount,
+          enabled: this.enabled,
+        });
+        return true;
+      }
+
+      if (message.type === 'TOGGLE_PROTECTION') {
+        this.enabled = !this.enabled;
+        if (this.enabled) {
+          this.injectOverlay();
+        } else {
+          this.removeOverlay();
+        }
+        sendResponse({ enabled: this.enabled });
+        return true;
+      }
+
+      return false;
+    });
+  }
+
+  removeOverlay() {
+    document.getElementById('privacy-firewall')?.remove();
+    if (this.originalTextarea) {
+      this.originalTextarea.style.display = 'block';
+    }
   }
   
   detectProvider() {
@@ -42,8 +80,9 @@ class PrivacyGateway {
   }
   
   injectOverlay() {
-    if (!this.provider) return;
-    
+    if (!this.provider || !this.enabled) return;
+    if (document.getElementById('privacy-firewall')) return;
+
     this.originalTextarea = this.provider.getTextarea();
     if (!this.originalTextarea) return;
     
@@ -77,7 +116,8 @@ class PrivacyGateway {
     
     const detections = detectSecrets(text);
     const count = detections.length;
-    
+    this.detectionCount = count;
+
     textarea.placeholder = `🔒 Private Input (Threats: ${count})`;
     textarea.style.borderColor = count > 0 ? '#ef4444' : '#10b981';
     
@@ -93,8 +133,12 @@ class PrivacyGateway {
     const sendBtn = this.provider.getSendButton();
     if (!sendBtn) return;
     
-    sendBtn.addEventListener('click', (e) => {
+    sendBtn.addEventListener('click', () => {
+      if (!this.enabled) return;
+
       const secureInput = document.getElementById('secure-input') as HTMLTextAreaElement;
+      if (!secureInput) return;
+
       const text = secureInput.value;
       
       const sanitized = sanitize(text, 'mask');
@@ -108,9 +152,12 @@ class PrivacyGateway {
   }
 }
 
-// Auto-initialize
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => new PrivacyGateway());
-} else {
+function init() {
   new PrivacyGateway();
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
 }
