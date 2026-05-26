@@ -1,12 +1,45 @@
+import type { PlasmoCSConfig } from "plasmo";
+import networkGuardUrl from "url:~/inject/network-guard.ts";
+
 import { detectSecrets, sanitize } from "~src/engine/patterns";
+import { isEmptyAfterRedaction } from "~src/engine/sanitize-payload";
 import { ChatGPT } from "~src/providers/chatgpt";
 import { Claude } from "~src/providers/claude";
 import { GenericAI } from "~src/providers/generic";
 import type { BaseProvider, InputElement } from "~src/providers/shared/base";
 
+export const config: PlasmoCSConfig = {
+  run_at: "document_start",
+};
+
 const BADGE_ID = "privacy-firewall-badge";
 const SCAN_DEBOUNCE_MS = 120;
 const BADGE_THROTTLE_MS = 100;
+
+function injectNetworkGuard() {
+  const root = document.documentElement;
+  if (
+    root.dataset.privacyNetworkGuard === "pending" ||
+    root.dataset.privacyNetworkGuard === "active"
+  ) {
+    return;
+  }
+
+  root.dataset.privacyNetworkGuard = "pending";
+  root.dataset.privacyFirewall = root.dataset.privacyFirewall || "on";
+
+  const script = document.createElement("script");
+  script.src = networkGuardUrl;
+  script.onload = () => {
+    root.dataset.privacyNetworkGuard = "active";
+    script.remove();
+  };
+  script.onerror = () => {
+    root.dataset.privacyNetworkGuard = "error";
+    script.remove();
+  };
+  (document.head || root).appendChild(script);
+}
 
 class PrivacyGateway {
   private provider: BaseProvider | null = null;
@@ -24,9 +57,32 @@ class PrivacyGateway {
   private lastBadgePosition = "";
 
   constructor() {
+    this.setProtectionFlag(true);
     this.setupMessageListener();
+    this.setupBlockedListener();
     this.setupSendInterceptor();
     this.startWatching();
+  }
+
+  setupBlockedListener() {
+    document.addEventListener("privacy-firewall-blocked", (event) => {
+      const detail = (event as CustomEvent<{ reason: string }>).detail;
+      this.showBlockedWarning(detail.reason);
+    });
+  }
+
+  showBlockedWarning(reason: string) {
+    const badge = document.getElementById(BADGE_ID);
+    if (badge) {
+      badge.textContent = "⚠️ Blocked: empty after redaction";
+      badge.style.background = "#f59e0b";
+    }
+
+    console.warn(`[Privacy Firewall] ${reason}`);
+  }
+
+  setProtectionFlag(active: boolean) {
+    document.documentElement.dataset.privacyFirewall = active ? "on" : "off";
   }
 
   startWatching() {
@@ -118,6 +174,7 @@ class PrivacyGateway {
 
       if (message.type === "TOGGLE_PROTECTION") {
         this.enabled = !this.enabled;
+        this.setProtectionFlag(this.enabled);
         if (this.enabled) {
           this.initialized = false;
           this.startWatching();
@@ -249,6 +306,55 @@ class PrivacyGateway {
   }
 
   setupSendInterceptor() {
+    const maybeRedactBeforeSend = (event: Event) => {
+      if (!this.enabled || !this.provider || !this.inputElement || this.sendGuard) {
+        return false;
+      }
+
+      const text = this.provider.getText(this.inputElement);
+      const redacted = sanitize(text, "mask");
+      if (redacted === text) {
+        return false;
+      }
+
+      if (isEmptyAfterRedaction(redacted)) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        this.showBlockedWarning(
+          "Message is only sensitive data. Add non-secret text before sending.",
+        );
+        return false;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+
+      this.provider.setText(this.inputElement, redacted);
+      this.detectionCount = 0;
+      this.updateIndicator();
+      return true;
+    };
+
+    document.addEventListener(
+      "mousedown",
+      (event) => {
+        if (!this.enabled || !this.provider || !this.inputElement || this.sendGuard) {
+          return;
+        }
+
+        const target = event.target as Element;
+        const sendButton = this.sendButton ?? this.provider.getSendButton();
+        if (!sendButton || (!sendButton.contains(target) && sendButton !== target)) {
+          return;
+        }
+
+        maybeRedactBeforeSend(event);
+      },
+      true,
+    );
+
     document.addEventListener(
       "click",
       (event) => {
@@ -264,23 +370,20 @@ class PrivacyGateway {
 
         const text = this.provider.getText(this.inputElement);
         const redacted = sanitize(text, "mask");
-        if (redacted === text) {
+        if (redacted === text || isEmptyAfterRedaction(redacted)) {
+          if (isEmptyAfterRedaction(redacted)) {
+            maybeRedactBeforeSend(event);
+          }
           return;
         }
 
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation();
-
-        this.provider.setText(this.inputElement, redacted);
-        this.detectionCount = 0;
-        this.updateIndicator();
-
-        this.sendGuard = true;
-        setTimeout(() => {
-          sendButton.click();
-          this.sendGuard = false;
-        }, 50);
+        if (maybeRedactBeforeSend(event)) {
+          this.sendGuard = true;
+          setTimeout(() => {
+            sendButton.click();
+            this.sendGuard = false;
+          }, 50);
+        }
       },
       true,
     );
@@ -296,19 +399,9 @@ class PrivacyGateway {
           return;
         }
 
-        const text = this.provider.getText(this.inputElement);
-        const redacted = sanitize(text, "mask");
-        if (redacted === text) {
+        if (!maybeRedactBeforeSend(event)) {
           return;
         }
-
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation();
-
-        this.provider.setText(this.inputElement, redacted);
-        this.detectionCount = 0;
-        this.updateIndicator();
 
         this.sendGuard = true;
         setTimeout(() => {
@@ -338,6 +431,8 @@ class PrivacyGateway {
     this.lastBadgePosition = "";
   }
 }
+
+injectNetworkGuard();
 
 function init() {
   new PrivacyGateway();
