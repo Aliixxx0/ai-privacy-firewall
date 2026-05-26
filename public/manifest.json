@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "AI Privacy Firewall",
+  "version": "0.1.0",
+  "description": "Detects and redacts sensitive data before sending to AI providers",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_popup": "src/popup/popup.html",
+    "default_title": "AI Privacy Firewall"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chat.openai.com/*",
+        "https://chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
+        "<all_urls>"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["detector.worker.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
