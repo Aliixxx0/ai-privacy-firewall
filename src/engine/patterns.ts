@@ -1,3 +1,5 @@
+import type { Detection, RedactionStrategy } from "~src/types";
+
 // Ultra-compressed regex patterns
 const PATTERNS = {
   email: {
