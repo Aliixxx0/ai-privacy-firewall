@@ -11,6 +11,11 @@ const MESSAGE_KEYS = new Set([
   "user_message",
   "completion",
   "instructions",
+  // ChatGPT nests user text here
+  "parts",
+  "body",
+  "input_text",
+  "user_input",
 ]);
 
 const SKIP_KEYS = new Set([
@@ -40,6 +45,12 @@ const SKIP_KEYS = new Set([
   "locale",
   "timezone",
   "user_agent",
+  "content_type",
+  "role",
+  "author",
+  "metadata",
+  "recipient",
+  "channel",
 ]);
 
 export class EmptyMessageError extends Error {
@@ -124,6 +135,15 @@ function findEmptyMessageField(value: unknown, parentKey?: string): string | nul
   return null;
 }
 
+export function looksLikeChatPayload(body: string): boolean {
+  return (
+    body.includes('"parts"') ||
+    body.includes('"message_content"') ||
+    body.includes('"messages"') ||
+    body.includes('"prompt"')
+  );
+}
+
 export function sanitizePayload(body: string): string {
   const trimmed = body.trim();
   if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
@@ -152,12 +172,23 @@ export function isProtectionEnabled(): boolean {
   return document.documentElement.dataset.privacyFirewall !== "off";
 }
 
-export function shouldSanitizeRequest(url: string): boolean {
-  try {
-    const parsed = new URL(url, location.origin);
-    const path = parsed.pathname.toLowerCase();
+export function isAiChatHost(hostname = location.hostname): boolean {
+  const host = hostname.toLowerCase();
+  return (
+    host.includes("chatgpt.com") ||
+    host.includes("chat.openai.com") ||
+    host.includes("openai.com") ||
+    host.includes("claude.ai")
+  );
+}
 
-    if (location.hostname.includes("claude.ai")) {
+export function shouldSanitizeRequest(url: string, body?: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.toLowerCase();
+    const host = parsed.hostname.toLowerCase();
+
+    if (host.includes("claude.ai")) {
       return (
         path.includes("/api/") ||
         path.includes("/chat") ||
@@ -166,11 +197,16 @@ export function shouldSanitizeRequest(url: string): boolean {
       );
     }
 
-    if (
-      location.hostname.includes("chatgpt.com") ||
-      location.hostname.includes("openai.com")
-    ) {
-      return path.includes("/backend-api/") || path.includes("/conversation");
+    if (isAiChatHost(host)) {
+      if (
+        path.includes("/backend-api/") ||
+        path.includes("/backend-anon/") ||
+        path.includes("/conversation") ||
+        path.includes("/chat/completions") ||
+        (body != null && looksLikeChatPayload(body))
+      ) {
+        return true;
+      }
     }
 
     return path.includes("/api/") || path.includes("/chat");
@@ -183,4 +219,42 @@ export function notifyBlocked(reason: string) {
   document.dispatchEvent(
     new CustomEvent("privacy-firewall-blocked", { detail: { reason } }),
   );
+}
+
+export function bodyToText(
+  body: BodyInit | Document | XMLHttpRequestBodyInit | null | undefined,
+): string | null {
+  if (body == null) {
+    return null;
+  }
+
+  if (typeof body === "string") {
+    return body;
+  }
+
+  if (body instanceof ArrayBuffer) {
+    return new TextDecoder().decode(body);
+  }
+
+  if (ArrayBuffer.isView(body)) {
+    return new TextDecoder().decode(body);
+  }
+
+  return null;
+}
+
+export function textToBody(text: string, original: BodyInit): BodyInit {
+  if (typeof original === "string") {
+    return text;
+  }
+
+  if (original instanceof ArrayBuffer) {
+    return new TextEncoder().encode(text).buffer;
+  }
+
+  if (ArrayBuffer.isView(original)) {
+    return new TextEncoder().encode(text);
+  }
+
+  return text;
 }

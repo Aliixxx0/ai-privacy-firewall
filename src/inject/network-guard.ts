@@ -1,13 +1,16 @@
 import {
   EmptyMessageError,
+  bodyToText,
   isProtectionEnabled,
   notifyBlocked,
   sanitizePayload,
   shouldSanitizeRequest,
+  textToBody,
 } from "~src/engine/sanitize-payload";
 
 const originalFetch = window.fetch.bind(window);
 const originalXhrSend = XMLHttpRequest.prototype.send;
+const originalSendBeacon = navigator.sendBeacon.bind(navigator);
 
 function resolveUrl(input: RequestInfo | URL): string {
   if (typeof input === "string") {
@@ -19,55 +22,53 @@ function resolveUrl(input: RequestInfo | URL): string {
   return input.url;
 }
 
-async function redactBody(
+function trySanitizeBody(
+  body: string,
+  url: string,
+): { redacted: string; changed: boolean } | "block" {
+  if (!shouldSanitizeRequest(url, body)) {
+    return { redacted: body, changed: false };
+  }
+
+  try {
+    const redacted = sanitizePayload(body);
+    return { redacted, changed: redacted !== body };
+  } catch (error) {
+    if (error instanceof EmptyMessageError) {
+      notifyBlocked(
+        "Message is only sensitive data. Add non-secret text before sending.",
+      );
+      return "block";
+    }
+    return { redacted: body, changed: false };
+  }
+}
+
+function trySanitizeInitBody(
   body: BodyInit | Document | XMLHttpRequestBodyInit | null | undefined,
   url: string,
-): Promise<BodyInit | Document | XMLHttpRequestBodyInit | null | undefined> {
-  if (body == null || !shouldSanitizeRequest(url)) {
+): BodyInit | Document | XMLHttpRequestBodyInit | null | undefined | "block" {
+  if (body == null) {
     return body;
   }
 
-  if (typeof body === "string") {
-    try {
-      const redacted = sanitizePayload(body);
-      return redacted === body ? body : redacted;
-    } catch (error) {
-      if (error instanceof EmptyMessageError) {
-        notifyBlocked(
-          "Message is only sensitive data. Add non-secret text before sending.",
-        );
-        throw error;
-      }
-      return body;
+  const text = bodyToText(body);
+  if (text != null) {
+    const result = trySanitizeBody(text, url);
+    if (result === "block") {
+      return "block";
     }
+    return result.changed ? textToBody(result.redacted, body as BodyInit) : body;
   }
 
   if (body instanceof Blob) {
-    const text = await body.text();
-    if (!text) {
-      return body;
-    }
-
-    try {
-      const redacted = sanitizePayload(text);
-      return redacted === text
-        ? body
-        : new Blob([redacted], { type: body.type || "application/json" });
-    } catch (error) {
-      if (error instanceof EmptyMessageError) {
-        notifyBlocked(
-          "Message is only sensitive data. Add non-secret text before sending.",
-        );
-        throw error;
-      }
-      return body;
-    }
+    return body;
   }
 
   return body;
 }
 
-window.fetch = async function patchedFetch(
+window.fetch = function patchedFetch(
   input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<Response> {
@@ -77,38 +78,54 @@ window.fetch = async function patchedFetch(
 
   const url = resolveUrl(input);
 
-  try {
-    if (init?.body != null) {
-      const redacted = await redactBody(init.body, url);
-      if (redacted !== init.body) {
-        init = { ...init, body: redacted as BodyInit };
+  if (init?.body != null) {
+    const text = bodyToText(init.body);
+    if (text != null) {
+      const result = trySanitizeBody(text, url);
+      if (result === "block") {
+        return Promise.reject(new EmptyMessageError());
       }
-    } else if (input instanceof Request) {
-      if (!shouldSanitizeRequest(url)) {
-        return originalFetch(input, init);
+      if (result.changed) {
+        init = { ...init, body: textToBody(result.redacted, init.body) };
       }
-
-      const text = await input.clone().text();
-      if (text) {
-        try {
-          const redacted = sanitizePayload(text);
-          if (redacted !== text) {
-            input = new Request(input, { body: redacted });
-          }
-        } catch (error) {
-          if (error instanceof EmptyMessageError) {
-            notifyBlocked(
-              "Message is only sensitive data. Add non-secret text before sending.",
-            );
-            return Promise.reject(error);
-          }
+    } else if (init.body instanceof Blob) {
+      return init.body.text().then((blobText) => {
+        const result = trySanitizeBody(blobText, url);
+        if (result === "block") {
+          return Promise.reject(new EmptyMessageError());
         }
-      }
+        const nextInit =
+          result.changed
+            ? {
+                ...init,
+                body: new Blob([result.redacted], {
+                  type: init.body instanceof Blob ? init.body.type || "application/json" : "application/json",
+                }),
+              }
+            : init;
+        return originalFetch(input, nextInit);
+      });
     }
-  } catch (error) {
-    if (error instanceof EmptyMessageError) {
-      return Promise.reject(error);
-    }
+  } else if (input instanceof Request) {
+    return input
+      .clone()
+      .text()
+      .then((text) => {
+        if (!text) {
+          return originalFetch(input, init);
+        }
+
+        const result = trySanitizeBody(text, url);
+        if (result === "block") {
+          return Promise.reject(new EmptyMessageError());
+        }
+
+        if (result.changed) {
+          input = new Request(input, { body: result.redacted });
+        }
+
+        return originalFetch(input, init);
+      });
   }
 
   return originalFetch(input, init);
@@ -135,22 +152,38 @@ XMLHttpRequest.prototype.send = function patchedSend(
     return originalXhrSend.call(this, body);
   }
 
-  const url = xhrUrls.get(this);
+  const url = xhrUrls.get(this) ?? "";
+  const sanitized = trySanitizeInitBody(body ?? null, url);
 
-  if (typeof body === "string" && body.length > 0 && url && shouldSanitizeRequest(url)) {
-    try {
-      body = sanitizePayload(body);
-    } catch (error) {
-      if (error instanceof EmptyMessageError) {
-        notifyBlocked(
-          "Message is only sensitive data. Add non-secret text before sending.",
-        );
-        return;
-      }
+  if (sanitized === "block") {
+    return;
+  }
+
+  return originalXhrSend.call(this, sanitized);
+};
+
+navigator.sendBeacon = function patchedSendBeacon(
+  url: string | URL,
+  data?: BodyInit | null,
+): boolean {
+  if (!isProtectionEnabled() || data == null) {
+    return originalSendBeacon(url, data);
+  }
+
+  const resolvedUrl = typeof url === "string" ? url : url.toString();
+  const text = bodyToText(data);
+
+  if (text != null) {
+    const result = trySanitizeBody(text, resolvedUrl);
+    if (result === "block") {
+      return false;
+    }
+    if (result.changed) {
+      return originalSendBeacon(url, textToBody(result.redacted, data));
     }
   }
 
-  return originalXhrSend.call(this, body);
+  return originalSendBeacon(url, data);
 };
 
 document.documentElement.dataset.privacyFirewall =

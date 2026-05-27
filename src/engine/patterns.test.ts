@@ -3,9 +3,14 @@ import { describe, expect, test } from "bun:test";
 import { detectSecrets, sanitize } from "./patterns";
 import {
   EmptyMessageError,
+  bodyToText,
+  isAiChatHost,
   isEmptyAfterRedaction,
+  looksLikeChatPayload,
   sanitizeDeep,
   sanitizePayload,
+  shouldSanitizeRequest,
+  textToBody,
 } from "./sanitize-payload";
 
 describe("detectSecrets - email", () => {
@@ -80,6 +85,19 @@ describe("detectSecrets - apiKey", () => {
     const detections = detectSecrets(`token ${key}`);
     expect(detections.some((d) => d.type === "apiKey")).toBe(true);
   });
+
+  test("detects pk publishable key", () => {
+    const key = "pk_live_12345678901234567890123456789012";
+    expect(detectSecrets(`stripe ${key}`).some((d) => d.type === "apiKey")).toBe(
+      true,
+    );
+  });
+
+  test("detects api key wrapped in backticks", () => {
+    const key = "sk-12345678901234567890123456789012";
+    const input = `use \`${key}\` please`;
+    expect(detectSecrets(input).some((d) => d.type === "apiKey")).toBe(true);
+  });
 });
 
 describe("detectSecrets - jwt", () => {
@@ -106,12 +124,31 @@ describe("detectSecrets - creditCard", () => {
       true,
     );
   });
+
+  test("detects dashed credit card", () => {
+    const card = "4111-1111-1111-1111";
+    expect(detectSecrets(`pay ${card}`).some((d) => d.type === "creditCard")).toBe(
+      true,
+    );
+  });
+
+  test("detects continuous credit card digits", () => {
+    expect(
+      detectSecrets("pay 4111111111111111").some((d) => d.type === "creditCard"),
+    ).toBe(true);
+  });
 });
 
 describe("detectSecrets - password", () => {
   test("detects password assignment", () => {
     expect(
       detectSecrets('config password="S3cret!"').some((d) => d.type === "password"),
+    ).toBe(true);
+  });
+
+  test("detects password with colon separator", () => {
+    expect(
+      detectSecrets("password: MyS3cret!").some((d) => d.type === "password"),
     ).toBe(true);
   });
 });
@@ -130,6 +167,41 @@ describe("detectSecrets - deduplication", () => {
   test("does not double-detect overlapping matches", () => {
     const detections = detectSecrets("0512345678");
     expect(detections.filter((d) => d.type === "saudiPhone")).toHaveLength(1);
+  });
+});
+
+describe("detectSecrets - metadata", () => {
+  test("records start and end offsets", () => {
+    const input = "hello test@example.com world";
+    const email = detectSecrets(input).find((d) => d.type === "email");
+
+    expect(email?.start).toBe(6);
+    expect(email?.end).toBe(22);
+    expect(input.slice(email!.start, email!.end)).toBe("test@example.com");
+  });
+
+  test("assigns confidence scores", () => {
+    const detections = detectSecrets(
+      "email test@example.com key sk-12345678901234567890123456789012",
+    );
+
+    expect(detections.find((d) => d.type === "email")?.confidence).toBe(0.95);
+    expect(detections.find((d) => d.type === "apiKey")?.confidence).toBe(0.9);
+  });
+
+  test("skips very short matches", () => {
+    expect(detectSecrets("sk-abc").some((d) => d.type === "apiKey")).toBe(false);
+  });
+
+  test("detects multiple secrets in one message", () => {
+    const input =
+      "email test@example.com phone 0512345678 key sk-12345678901234567890123456789012";
+    const types = detectSecrets(input).map((d) => d.type);
+
+    expect(types).toContain("email");
+    expect(types).toContain("saudiPhone");
+    expect(types).toContain("apiKey");
+    expect(types).toHaveLength(3);
   });
 });
 
@@ -180,6 +252,31 @@ describe("sanitize - masking behavior", () => {
     expect(output.startsWith("email ")).toBe(true);
     expect(output).not.toContain("test@example.com");
     expect(output.split(" ")[1]?.length).toBe(8);
+  });
+
+  test("sanitizes real-world chatgpt-style message", () => {
+    const input =
+      "see this phone number pls,sk-12345678901234567890123456789012 ,0512345678,0563434567";
+    const output = sanitize(input);
+
+    expect(output).toContain("see this phone number pls");
+    expect(output).not.toContain("sk-12345678901234567890123456789012");
+    expect(output).not.toContain("0512345678");
+    expect(output).toContain("****");
+    expect(output).toContain("**********");
+  });
+
+  test("sanitizes multiple saudi numbers in one line", () => {
+    const output = sanitize("call 0512345678 or 0598765432");
+
+    expect(output).not.toContain("0512345678");
+    expect(output).not.toContain("0598765432");
+    expect(output.match(/\*{10}/g)?.length).toBe(2);
+  });
+
+  test("preserves surrounding punctuation after redaction", () => {
+    expect(sanitize("(test@example.com)")).toBe("(****)");
+    expect(sanitize("email: test@example.com.")).toBe("email: ****.");
   });
 });
 
@@ -245,6 +342,255 @@ describe("sanitizePayload - claude api bodies", () => {
   });
 });
 
+describe("sanitizePayload - chatgpt api bodies", () => {
+  test("redacts content.parts user text", () => {
+    const body = JSON.stringify({
+      action: "next",
+      messages: [
+        {
+          id: "08e83fff-47f3-48d3-9d9d-cd88ba4f6a2c",
+          author: { role: "user" },
+          content: {
+            content_type: "text",
+            parts: [
+              "see this phone number pls,sk-12345678901234567890123456789012 ,0512345678",
+            ],
+          },
+        },
+      ],
+    });
+
+    const result = JSON.parse(sanitizePayload(body));
+    const part = result.messages[0].content.parts[0];
+
+    expect(part).toContain("see this phone number pls");
+    expect(part).toContain("****");
+    expect(part).toContain("**********");
+    expect(part).not.toContain("sk-12345678901234567890123456789012");
+    expect(part).not.toContain("0512345678");
+    expect(result.messages[0].id).toBe("08e83fff-47f3-48d3-9d9d-cd88ba4f6a2c");
+    expect(result.messages[0].author.role).toBe("user");
+    expect(result.messages[0].content.content_type).toBe("text");
+  });
+
+  test("preserves metadata while redacting parts", () => {
+    const body = JSON.stringify({
+      conversation_id: "conv-123",
+      model: "gpt-4o",
+      messages: [
+        {
+          content: {
+            content_type: "text",
+            parts: ["email test@example.com thanks"],
+          },
+        },
+      ],
+    });
+
+    const result = JSON.parse(sanitizePayload(body));
+
+    expect(result.conversation_id).toBe("conv-123");
+    expect(result.model).toBe("gpt-4o");
+    expect(result.messages[0].content.parts[0]).toBe("email **** thanks");
+  });
+
+  test("redacts every part in a multi-part array", () => {
+    const body = JSON.stringify({
+      messages: [
+        {
+          content: {
+            content_type: "text",
+            parts: [
+              "first test@example.com",
+              "second 0512345678",
+            ],
+          },
+        },
+      ],
+    });
+
+    const result = JSON.parse(sanitizePayload(body));
+    const parts = result.messages[0].content.parts;
+
+    expect(parts[0]).toBe("first ****");
+    expect(parts[1]).toBe("second **********");
+  });
+
+  test("matches exact leaking payload shape from chatgpt", () => {
+    const body = JSON.stringify({
+      action: "next",
+      messages: [
+        {
+          id: "08e83fff-47f3-48d3-9d9d-cd88ba4f6a2c",
+          author: { role: "user" },
+          content: {
+            content_type: "text",
+            parts: [
+              "see this phone number pls,sk-12345678901234567890123456789012 ,0512345678,0563434567",
+            ],
+          },
+        },
+      ],
+    });
+
+    const serialized = sanitizePayload(body);
+    expect(serialized).not.toContain("sk-12345678901234567890123456789012");
+    expect(serialized).not.toContain("0512345678");
+    expect(serialized).toContain("see this phone number pls");
+  });
+});
+
+describe("shouldSanitizeRequest - chatgpt", () => {
+  test("matches backend-api conversation routes", () => {
+    expect(
+      shouldSanitizeRequest("https://chatgpt.com/backend-api/conversation"),
+    ).toBe(true);
+    expect(
+      shouldSanitizeRequest("https://chatgpt.com/backend-anon/conversation"),
+    ).toBe(true);
+  });
+
+  test("matches chat payload even on unknown chatgpt path", () => {
+    const body = JSON.stringify({
+      messages: [{ content: { parts: ["hello"] } }],
+    });
+
+    expect(shouldSanitizeRequest("https://chatgpt.com/new-endpoint/v1", body)).toBe(
+      true,
+    );
+  });
+
+  test("does not match chatgpt telemetry endpoints", () => {
+    expect(
+      shouldSanitizeRequest("https://chatgpt.com/ces/v1/t", "{}"),
+    ).toBe(false);
+    expect(
+      shouldSanitizeRequest("https://chatgpt.com/statsc/flush", "{}"),
+    ).toBe(false);
+  });
+
+  test("matches chat.openai.com backend routes", () => {
+    expect(
+      shouldSanitizeRequest("https://chat.openai.com/backend-api/conversation"),
+    ).toBe(true);
+  });
+});
+
+describe("shouldSanitizeRequest - claude", () => {
+  test("matches claude chat api routes", () => {
+    expect(
+      shouldSanitizeRequest("https://claude.ai/api/organizations/org/chat"),
+    ).toBe(true);
+    expect(
+      shouldSanitizeRequest("https://claude.ai/api/messages"),
+    ).toBe(true);
+  });
+
+  test("does not match claude static assets", () => {
+    expect(
+      shouldSanitizeRequest("https://claude.ai/_next/static/chunk.js"),
+    ).toBe(false);
+  });
+});
+
+describe("looksLikeChatPayload", () => {
+  test("detects chat-shaped json bodies", () => {
+    expect(looksLikeChatPayload('{"messages":[{"content":{"parts":["hi"]}}]}')).toBe(
+      true,
+    );
+    expect(looksLikeChatPayload('{"message_content":"hello"}')).toBe(true);
+    expect(looksLikeChatPayload('{"prompt":"hello"}')).toBe(true);
+  });
+
+  test("ignores non-chat json bodies", () => {
+    expect(looksLikeChatPayload('{"event":"page_view"}')).toBe(false);
+    expect(looksLikeChatPayload('{"status":"ok"}')).toBe(false);
+  });
+});
+
+describe("isAiChatHost", () => {
+  test("recognizes supported ai chat hosts", () => {
+    expect(isAiChatHost("chatgpt.com")).toBe(true);
+    expect(isAiChatHost("chat.openai.com")).toBe(true);
+    expect(isAiChatHost("claude.ai")).toBe(true);
+  });
+
+  test("rejects unrelated hosts", () => {
+    expect(isAiChatHost("google.com")).toBe(false);
+    expect(isAiChatHost("example.com")).toBe(false);
+  });
+});
+
+describe("body conversion helpers", () => {
+  test("bodyToText reads string and array buffer bodies", () => {
+    const text = '{"message_content":"hello"}';
+    expect(bodyToText(text)).toBe(text);
+    expect(bodyToText(new TextEncoder().encode(text))).toBe(text);
+    expect(bodyToText(new TextEncoder().encode(text).buffer)).toBe(text);
+  });
+
+  test("textToBody preserves original body type", () => {
+    const text = '{"message_content":"****"}';
+    expect(textToBody(text, "original")).toBe(text);
+    expect(textToBody(text, new TextEncoder().encode("x").buffer)).toBeInstanceOf(
+      ArrayBuffer,
+    );
+    expect(textToBody(text, new TextEncoder().encode("x"))).toBeInstanceOf(
+      Uint8Array,
+    );
+  });
+
+  test("bodyToText returns null for unsupported body types", () => {
+    expect(bodyToText(new Blob(["x"]))).toBe(null);
+    expect(bodyToText(null)).toBe(null);
+  });
+});
+
+describe("sanitizePayload - edge cases", () => {
+  test("does not mutate skipped metadata keys", () => {
+    const body = JSON.stringify({
+      message_content: "hello test@example.com",
+      trace_id: "trace-abc-123",
+      message_uuid: "uuid-should-stay",
+      parent_message_uuid: "parent-uuid-should-stay",
+    });
+
+    const result = JSON.parse(sanitizePayload(body));
+
+    expect(result.message_content).toBe("hello ****");
+    expect(result.trace_id).toBe("trace-abc-123");
+    expect(result.message_uuid).toBe("uuid-should-stay");
+    expect(result.parent_message_uuid).toBe("parent-uuid-should-stay");
+  });
+
+  test("sanitizes prompt field for generic api payloads", () => {
+    const body = JSON.stringify({
+      prompt: "my number is 0512345678",
+      model: "gpt-4o",
+    });
+
+    const result = JSON.parse(sanitizePayload(body));
+    expect(result.prompt).toBe("my number is **********");
+    expect(result.model).toBe("gpt-4o");
+  });
+
+  test("falls back to plain sanitize for invalid json", () => {
+    expect(sanitizePayload("phone 0512345678")).toBe("phone **********");
+    expect(sanitizePayload("not-json but test@example.com")).toBe(
+      "not-json but ****",
+    );
+  });
+
+  test("allows message with punctuation after redaction", () => {
+    const body = JSON.stringify({
+      message_content: "please redact test@example.com!",
+    });
+
+    const result = JSON.parse(sanitizePayload(body));
+    expect(result.message_content).toBe("please redact ****!");
+  });
+});
+
 describe("isEmptyAfterRedaction", () => {
   test("detects asterisk-only content as empty", () => {
     expect(isEmptyAfterRedaction("****")).toBe(true);
@@ -268,6 +614,38 @@ describe("sanitizeDeep", () => {
     expect(result).toEqual({
       context_token: "secret-looking-but-kept",
       message_content: "****",
+    });
+  });
+
+  test("does not sanitize content_type or role fields", () => {
+    const result = sanitizeDeep({
+      content: {
+        content_type: "text",
+        role: "user",
+        parts: ["test@example.com"],
+      },
+    });
+
+    expect(result).toEqual({
+      content: {
+        content_type: "text",
+        role: "user",
+        parts: ["****"],
+      },
+    });
+  });
+
+  test("leaves numeric and boolean values unchanged", () => {
+    const result = sanitizeDeep({
+      message_content: "hello",
+      max_tokens: 1024,
+      stream: true,
+    });
+
+    expect(result).toEqual({
+      message_content: "hello",
+      max_tokens: 1024,
+      stream: true,
     });
   });
 });
