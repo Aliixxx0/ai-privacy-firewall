@@ -2,7 +2,7 @@ import type { PlasmoCSConfig } from "plasmo";
 import networkGuardUrl from "url:~/inject/network-guard.ts";
 
 import { detectSecrets, sanitize } from "~src/engine/patterns";
-import { isEmptyAfterRedaction } from "~src/engine/sanitize-payload";
+import { isAiChatHost, isEmptyAfterRedaction } from "~src/engine/sanitize-payload";
 import { ChatGPT } from "~src/providers/chatgpt";
 import { Claude } from "~src/providers/claude";
 import { GenericAI } from "~src/providers/generic";
@@ -61,7 +61,9 @@ class PrivacyGateway {
     this.setupMessageListener();
     this.setupBlockedListener();
     this.setupSendInterceptor();
-    this.startWatching();
+    if (isAiChatHost()) {
+      this.startWatching();
+    }
   }
 
   setupBlockedListener() {
@@ -144,6 +146,10 @@ class PrivacyGateway {
   }
 
   detectProvider() {
+    if (!isAiChatHost()) {
+      return;
+    }
+
     const providers: BaseProvider[] = [
       new ChatGPT(),
       new Claude(),
@@ -429,7 +435,9 @@ class PrivacyGateway {
   }
 }
 
-injectNetworkGuard();
+if (isAiChatHost()) {
+  injectNetworkGuard();
+}
 
 function init() {
   new PrivacyGateway();
