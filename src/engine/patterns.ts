@@ -10,13 +10,16 @@ type PatternConfig = {
 const PHONE_CONFIG: Omit<PatternConfig, "pattern"> = {
   confidence: 0.92,
   preserveLengthMask: true,
-  minLength: 4,
+  minLength: 3,
 };
 
 const PATTERNS: Record<string, PatternConfig> = {
   email: {
-    pattern: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
+    // @g/@h domains (incl. partial while typing) and domains containing edu, gov, or sa
+    pattern:
+      /(?:[a-zA-Z0-9._%+-]+@(?:[gh][a-zA-Z0-9.-]*|[a-zA-Z0-9.-]*(?:edu|gov|sa)[a-zA-Z0-9.-]*))/gi,
     confidence: 0.95,
+    minLength: 4,
   },
   saudiPhonePlus: {
     pattern: /\+966[\s-]?\d{0,9}/g,
@@ -27,7 +30,12 @@ const PATTERNS: Record<string, PatternConfig> = {
     ...PHONE_CONFIG,
   },
   saudiPhone966: {
-    pattern: /(?<!\d)966[\s-]5\d{0,8}(?!\d)/g,
+    pattern: /(?<!\d)966[\s-]?5\d{0,8}(?!\d)/g,
+    ...PHONE_CONFIG,
+  },
+  saudiPhoneLocal: {
+    // 051–059 without requiring "phone number" context
+    pattern: /(?<!\d)05(?:[\s-]*\d+){1,3}(?!\d)/g,
     ...PHONE_CONFIG,
   },
   saudiNationalId: {
@@ -62,6 +70,9 @@ const PATTERNS: Record<string, PatternConfig> = {
 const PASSWORD_VALUE_PATTERN =
   /(?:passw(?:ord)?)\s*(?:is|:|=|>|<)\s*["']?([^\s"']+)["']?/gi;
 
+const LABELED_SECRET_PATTERN =
+  /(?:[\w-]+(?:[\s_-]+)*KEY|[\w-]+_ID)\s*(?:is|:|=|>|<)\s*["']?([^\s"']+)["']?/gi;
+
 const PHONE_TYPES = new Set([
   "saudiPhonePlus",
   "saudiPhone9665",
@@ -69,47 +80,13 @@ const PHONE_TYPES = new Set([
   "saudiPhoneLocal",
 ]);
 
-const CONTEXT_PHONE_PATTERN = /(?:phone\s*number|number)/gi;
-const LOCAL_PHONE_PATTERN = /05(?:[\s-]*\d+){1,3}(?!\d)/g;
+function isValidLocalPhone(value: string): boolean {
+  const digits = value.replace(/\D/g, "");
+  return /^05[1-9]\d{0,8}$/.test(digits);
+}
 
-function detectContextualLocalPhones(text: string): Detection[] {
-  const detections: Detection[] = [];
-  const contextMatches: RegExpMatchArray[] = [];
-
-  for (const match of text.matchAll(CONTEXT_PHONE_PATTERN)) {
-    if (match[0].toLowerCase() === "number") {
-      const before = text.slice(Math.max(0, match.index! - 6), match.index!);
-      if (/phone\s*$/i.test(before)) {
-        continue;
-      }
-    }
-    contextMatches.push(match);
-  }
-
-  for (let i = 0; i < contextMatches.length; i++) {
-    const contextMatch = contextMatches[i];
-    const sliceStart = contextMatch.index! + contextMatch[0].length;
-    const sliceEnd = contextMatches[i + 1]?.index ?? text.length;
-    const slice = text.slice(sliceStart, sliceEnd);
-
-    for (const phoneMatch of slice.matchAll(LOCAL_PHONE_PATTERN)) {
-      const value = phoneMatch[0];
-      if (value.length < 2) {
-        continue;
-      }
-
-      const start = sliceStart + (phoneMatch.index || 0);
-      detections.push({
-        type: "saudiPhoneLocal",
-        text: value,
-        confidence: PHONE_CONFIG.confidence,
-        start,
-        end: start + value.length,
-      });
-    }
-  }
-
-  return detections;
+function trimTrailingEmailPunctuation(text: string): string {
+  return text.replace(/[.,;:!?)]+$/, "");
 }
 
 function maskDetection(
@@ -125,7 +102,7 @@ function maskDetection(
     return "";
   }
 
-  if (config?.preserveLengthMask || detection.type === "password") {
+  if (config?.preserveLengthMask || detection.type === "password" || detection.type === "labeledSecret") {
     return "*".repeat(detection.text.length);
   }
 
@@ -162,10 +139,15 @@ function dedupeDetections(detections: Detection[]): Detection[] {
   return kept;
 }
 
-function detectPasswordValues(text: string): Detection[] {
+function detectValueAfterLabel(
+  text: string,
+  pattern: RegExp,
+  type: Detection["type"],
+  confidence: number,
+): Detection[] {
   const detections: Detection[] = [];
 
-  for (const match of text.matchAll(PASSWORD_VALUE_PATTERN)) {
+  for (const match of text.matchAll(pattern)) {
     const value = match[1];
     if (!value || value.length < 2) {
       continue;
@@ -173,9 +155,9 @@ function detectPasswordValues(text: string): Detection[] {
 
     const valueStart = match.index! + match[0].lastIndexOf(value);
     detections.push({
-      type: "password",
+      type,
       text: value,
-      confidence: 0.85,
+      confidence,
       start: valueStart,
       end: valueStart + value.length,
     });
@@ -191,20 +173,40 @@ export function detectSecrets(text: string): Detection[] {
     const minLength = config.minLength ?? 6;
 
     for (const match of text.matchAll(config.pattern)) {
-      if (match[0].length >= minLength) {
+      let matched = match[0];
+      let start = match.index || 0;
+      let end = start + matched.length;
+
+      if (type === "email") {
+        const trimmed = trimTrailingEmailPunctuation(matched);
+        if (trimmed.length < matched.length) {
+          matched = trimmed;
+          end = start + matched.length;
+        }
+      }
+
+      if (type === "saudiPhoneLocal" && !isValidLocalPhone(matched)) {
+        continue;
+      }
+
+      if (matched.length >= minLength) {
         detections.push({
           type,
-          text: match[0],
+          text: matched,
           confidence: config.confidence,
-          start: match.index || 0,
-          end: (match.index || 0) + match[0].length,
+          start,
+          end,
         });
       }
     }
   }
 
-  detections.push(...detectPasswordValues(text));
-  detections.push(...detectContextualLocalPhones(text));
+  detections.push(
+    ...detectValueAfterLabel(text, PASSWORD_VALUE_PATTERN, "password", 0.85),
+  );
+  detections.push(
+    ...detectValueAfterLabel(text, LABELED_SECRET_PATTERN, "labeledSecret", 0.88),
+  );
 
   return dedupeDetections(detections);
 }

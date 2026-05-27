@@ -23,21 +23,34 @@ function findPhones(input: string) {
 
 describe("detectSecrets - email", () => {
   const cases = [
-    "contact me at user@example.com today",
-    "send to admin@company.co.uk",
-    "mixed USER+tag@domain.io and text",
+    { input: "contact me at user@gmail.com today", domain: "gmail" },
+    { input: "send to admin@company.gov.sa", domain: "gov.sa" },
+    { input: "mixed USER+tag@school.edu and text", domain: "edu" },
+    { input: "reach me at ali@hotmail.com", domain: "hotmail" },
+    { input: "partial while typing john@g", domain: "@g" },
   ];
 
-  for (const input of cases) {
-    test(`detects email in: ${input}`, () => {
-      const detections = detectSecrets(input);
-      expect(detections.some((d) => d.type === "email")).toBe(true);
+  for (const { input, domain } of cases) {
+    test(`detects sensitive email (${domain}) in: ${input}`, () => {
+      expect(detectSecrets(input).some((d) => d.type === "email")).toBe(true);
     });
   }
+
+  test("does not detect generic example.com email", () => {
+    expect(detectSecrets("contact test@example.com").some((d) => d.type === "email")).toBe(
+      false,
+    );
+  });
 
   test("does not detect invalid email", () => {
     expect(detectSecrets("not-an-email@").some((d) => d.type === "email")).toBe(
       false,
+    );
+  });
+
+  test("detects .sa TLD emails", () => {
+    expect(detectSecrets("info@business.sa").some((d) => d.type === "email")).toBe(
+      true,
     );
   });
 });
@@ -68,8 +81,13 @@ describe("detectSecrets - saudiPhone", () => {
     expect(findPhone("country +966")?.text).toBe("+966");
   });
 
-  test("detects 05 only after phone number context", () => {
-    expect(findPhone("mobile 0512345678")).toBeUndefined();
+  test("detects 05 prefixes without context text", () => {
+    expect(findPhone("mobile 0512345678")?.text).toBe("0512345678");
+    expect(findPhone("call 0598765432")?.text).toBe("0598765432");
+    expect(findPhone("052 1234 5678")?.text).toBe("052 1234 5678");
+  });
+
+  test("still detects 05 after phone number context", () => {
     expect(findPhone("phone number 0512345678")?.text).toBe("0512345678");
     expect(findPhone("Phone Number is 05 1234 5678")?.text).toBe("05 1234 5678");
     expect(findPhone("my number: 0512345678")?.text).toBe("0512345678");
@@ -82,16 +100,15 @@ describe("detectSecrets - saudiPhone", () => {
     expect(phone?.text).toBe("0512345678");
   });
 
-  test("masks partial local number while typing after context", () => {
-    const input = "phone number 051234567";
-    const phone = findPhone(input);
-    expect(phone?.text).toBe("051234567");
+  test("masks partial local prefix while typing", () => {
+    expect(findPhone("051")?.text).toBe("051");
+    expect(findPhone("0521234")?.text).toBe("0521234");
   });
 
   const invalidCases = [
     "0612345678",
     "1234567890",
-    "051234567",
+    "0501234567",
     "order id 966512345678901234",
   ];
 
@@ -221,6 +238,32 @@ describe("detectSecrets - password", () => {
   });
 });
 
+describe("detectSecrets - labeledSecret", () => {
+  test("masks value after API_KEY", () => {
+    expect(sanitize("API_KEY=abc123secret")).toBe("API_KEY=************");
+  });
+
+  test("masks value after SECRET KEY with space", () => {
+    expect(sanitize("SECRET KEY: mytoken123")).toBe("SECRET KEY: **********");
+  });
+
+  test("masks value after USER_ID", () => {
+    expect(sanitize("USER_ID is 9988776655")).toBe("USER_ID is **********");
+  });
+
+  test("masks value after client_id case-insensitively", () => {
+    expect(sanitize("client_id=abc-def-ghi")).toBe("client_id=***********");
+  });
+
+  test("does not treat plain 'order id' as a labeled secret", () => {
+    expect(
+      detectSecrets("order id 966512345678901234").some(
+        (d) => d.type === "labeledSecret",
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("detectSecrets - bearerToken", () => {
   test("detects bearer token", () => {
     expect(
@@ -240,17 +283,17 @@ describe("detectSecrets - deduplication", () => {
 
 describe("detectSecrets - metadata", () => {
   test("records start and end offsets", () => {
-    const input = "hello test@example.com world";
+    const input = "hello test@gmail.com world";
     const email = detectSecrets(input).find((d) => d.type === "email");
 
     expect(email?.start).toBe(6);
-    expect(email?.end).toBe(22);
-    expect(input.slice(email!.start, email!.end)).toBe("test@example.com");
+    expect(email?.end).toBe(20);
+    expect(input.slice(email!.start, email!.end)).toBe("test@gmail.com");
   });
 
   test("assigns confidence scores", () => {
     const detections = detectSecrets(
-      "email test@example.com key sk-12345678901234567890123456789012",
+      "email test@gmail.com key sk-12345678901234567890123456789012",
     );
 
     expect(detections.find((d) => d.type === "email")?.confidence).toBe(0.95);
@@ -263,7 +306,7 @@ describe("detectSecrets - metadata", () => {
 
   test("detects multiple secrets in one message", () => {
     const input =
-      "email test@example.com phone number 0512345678 key sk-12345678901234567890123456789012";
+      "email test@gmail.com mobile 0512345678 key sk-12345678901234567890123456789012";
     const types = detectSecrets(input).map((d) => d.type);
 
     expect(types).toContain("email");
@@ -275,7 +318,7 @@ describe("detectSecrets - metadata", () => {
 
 describe("sanitize - masking behavior", () => {
   test("masks email with short placeholder", () => {
-    expect(sanitize("email test@example.com")).toBe("email ****");
+    expect(sanitize("email test@gmail.com")).toBe("email ****");
   });
 
   test("masks api key with short placeholder", () => {
@@ -296,12 +339,12 @@ describe("sanitize - masking behavior", () => {
 
   test("masks multiple secret types in one message", () => {
     const input =
-      "email test@example.com phone number 0512345678 key sk-12345678901234567890123456789012";
+      "email test@gmail.com mobile 0512345678 key sk-12345678901234567890123456789012";
     const output = sanitize(input);
 
     expect(output).toContain("****");
     expect(output).toContain("**********");
-    expect(output).not.toContain("test@example.com");
+    expect(output).not.toContain("test@gmail.com");
     expect(output).not.toContain("0512345678");
     expect(output).not.toContain("sk-12345678901234567890123456789012");
   });
@@ -312,13 +355,13 @@ describe("sanitize - masking behavior", () => {
   });
 
   test("remove strategy strips detections", () => {
-    expect(sanitize("email test@example.com", "remove")).toBe("email ");
+    expect(sanitize("email test@gmail.com", "remove")).toBe("email ");
   });
 
   test("hash strategy replaces with hex hash prefix", () => {
-    const output = sanitize("email test@example.com", "hash");
+    const output = sanitize("email test@gmail.com", "hash");
     expect(output.startsWith("email ")).toBe(true);
-    expect(output).not.toContain("test@example.com");
+    expect(output).not.toContain("test@gmail.com");
     expect(output.split(" ")[1]?.length).toBe(8);
   });
 
@@ -352,15 +395,19 @@ describe("sanitize - masking behavior", () => {
   });
 
   test("preserves surrounding punctuation after redaction", () => {
-    expect(sanitize("(test@example.com)")).toBe("(****)");
-    expect(sanitize("email: test@example.com.")).toBe("email: ****.");
+    expect(sanitize("(test@gmail.com)")).toBe("(****)");
+    expect(sanitize("email: test@gmail.com.")).toBe("email: ****.");
+  });
+
+  test("leaves generic example.com unmasked", () => {
+    expect(sanitize("email test@example.com")).toBe("email test@example.com");
   });
 });
 
 describe("sanitizePayload - claude api bodies", () => {
   test("redacts message_content only", () => {
     const body = JSON.stringify({
-      message_content: "email test@example.com phone number 0512345678",
+      message_content: "email test@gmail.com phone number 0512345678",
       context_token: "abc-session-token",
       conversation_id: "uuid-1234-5678",
     });
@@ -399,7 +446,7 @@ describe("sanitizePayload - claude api bodies", () => {
 
   test("throws when message is only secrets", () => {
     const body = JSON.stringify({
-      message_content: "test@example.com",
+      message_content: "test@gmail.com",
     });
 
     expect(() => sanitizePayload(body)).toThrow(EmptyMessageError);
@@ -407,7 +454,7 @@ describe("sanitizePayload - claude api bodies", () => {
 
   test("allows mixed message after redaction", () => {
     const body = JSON.stringify({
-      message_content: "my email is test@example.com thanks",
+      message_content: "my email is test@gmail.com thanks",
     });
 
     const result = JSON.parse(sanitizePayload(body));
@@ -460,7 +507,7 @@ describe("sanitizePayload - chatgpt api bodies", () => {
         {
           content: {
             content_type: "text",
-            parts: ["email test@example.com thanks"],
+            parts: ["email test@gmail.com thanks"],
           },
         },
       ],
@@ -480,7 +527,7 @@ describe("sanitizePayload - chatgpt api bodies", () => {
           content: {
             content_type: "text",
             parts: [
-              "first test@example.com",
+              "first test@gmail.com",
               "phone number 0512345678",
             ],
           },
@@ -628,7 +675,7 @@ describe("body conversion helpers", () => {
 describe("sanitizePayload - edge cases", () => {
   test("does not mutate skipped metadata keys", () => {
     const body = JSON.stringify({
-      message_content: "hello test@example.com",
+      message_content: "hello test@gmail.com",
       trace_id: "trace-abc-123",
       message_uuid: "uuid-should-stay",
       parent_message_uuid: "parent-uuid-should-stay",
@@ -657,14 +704,14 @@ describe("sanitizePayload - edge cases", () => {
     expect(sanitizePayload("phone number 0512345678")).toBe(
       "phone number **********",
     );
-    expect(sanitizePayload("not-json but test@example.com")).toBe(
+    expect(sanitizePayload("not-json but test@gmail.com")).toBe(
       "not-json but ****",
     );
   });
 
   test("allows message with punctuation after redaction", () => {
     const body = JSON.stringify({
-      message_content: "please redact test@example.com!",
+      message_content: "please redact test@gmail.com!",
     });
 
     const result = JSON.parse(sanitizePayload(body));
@@ -689,7 +736,7 @@ describe("sanitizeDeep", () => {
   test("leaves non-message keys untouched", () => {
     const result = sanitizeDeep({
       context_token: "secret-looking-but-kept",
-      message_content: "test@example.com",
+      message_content: "test@gmail.com",
     });
 
     expect(result).toEqual({
@@ -703,7 +750,7 @@ describe("sanitizeDeep", () => {
       content: {
         content_type: "text",
         role: "user",
-        parts: ["test@example.com"],
+        parts: ["test@gmail.com"],
       },
     });
 
