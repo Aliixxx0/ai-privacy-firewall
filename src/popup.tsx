@@ -1,4 +1,9 @@
-import React, { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
+
+import "~src/style.css";
+
+import { ExtensionPopup } from "~src/components/popup/ExtensionPopup";
+import type { Platform, PopupState } from "~src/components/popup/tokens";
 
 type StatusResponse = {
   provider: string;
@@ -83,62 +88,35 @@ export const Popup: React.FC = () => {
     setStatusNote("");
   };
 
+  const normalized = provider.toLowerCase();
+  const platform: Platform | null =
+    normalized.includes("chatgpt") || normalized.includes("openai")
+      ? "ChatGPT"
+      : normalized.includes("claude")
+        ? "Claude"
+        : connected
+          ? (null as Platform | null)
+          : null;
+
+  const state: PopupState = !connected
+    ? "disconnected"
+    : !enabled
+      ? "paused"
+      : detections > 0
+        ? "active-threats"
+        : "active-zero";
+
   return (
-    <div className="w-80 bg-gradient-to-br from-slate-900 to-slate-800 text-white p-6 rounded-lg shadow-2xl">
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-xl font-bold">🔒 Privacy Firewall</h1>
-        <span
-          className={`px-2 py-1 rounded text-xs font-bold ${enabled && connected ? "bg-green-500" : "bg-red-500"}`}
-        >
-          {connected ? (enabled ? "ACTIVE" : "OFF") : "NO TAB"}
-        </span>
-      </div>
-
-      {!connected && (
-        <div className="bg-amber-900/40 border border-amber-600 rounded-lg p-3 mb-4 text-xs text-amber-200">
-          {statusNote}
-        </div>
-      )}
-
-      <div className="bg-slate-700 rounded-lg p-4 mb-4">
-        <div className="text-xs text-slate-400 uppercase tracking-wider">
-          Protected Platform
-        </div>
-        <div className="text-lg font-bold text-blue-400">{provider}</div>
-      </div>
-
-      <div className="bg-slate-700 rounded-lg p-4 mb-6">
-        <div className="text-xs text-slate-400 uppercase tracking-wider">
-          Threats Detected
-        </div>
-        <div className="text-3xl font-bold text-red-400">{detections}</div>
-        {detections > 0 && (
-          <div className="text-xs text-red-300 mt-1">Redacted before send ✓</div>
-        )}
-      </div>
-
-      <button
-        type="button"
-        onClick={handleToggle}
-        disabled={!connected}
-        className={`w-full py-2 px-4 rounded font-bold transition ${
-          !connected
-            ? "bg-slate-600 text-slate-300 cursor-not-allowed"
-            : enabled
-              ? "bg-green-600 hover:bg-green-700 text-white"
-              : "bg-red-600 hover:bg-red-700 text-white"
-        }`}
-      >
-        {!connected
-          ? "Open an AI chat tab"
-          : enabled
-            ? "✓ Protection Active"
-            : "✗ Protection Disabled"}
-      </button>
-
-      <div className="text-xs text-slate-500 text-center mt-4">
-        All processing local • No data sent
-      </div>
+    <div className="w-[320px] min-h-[420px] overflow-hidden">
+      <ExtensionPopup
+        state={state}
+        platform={state === "disconnected" ? null : platform}
+        threatCount={detections}
+        onToggle={handleToggle}
+      />
+      {state === "disconnected" && statusNote ? (
+        <div className="hidden">{statusNote}</div>
+      ) : null}
     </div>
   );
 };
