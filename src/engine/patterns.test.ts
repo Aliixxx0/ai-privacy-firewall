@@ -255,6 +255,23 @@ describe("detectSecrets - labeledSecret", () => {
     expect(sanitize("client_id=abc-def-ghi")).toBe("client_id=***********");
   });
 
+  test("masks value after KEY in different formats", () => {
+    expect(sanitize("KEY=sk-123")).toBe("KEY=******");
+    expect(sanitize("key = abcdef")).toBe("key = ******");
+    expect(sanitize("key: token123")).toBe("key: ********");
+    expect(sanitize("KEY : token123")).toBe("KEY : ********");
+  });
+
+  test("masks 10 digits after ID label in different formats", () => {
+    expect(sanitize("ID=1023456789")).toBe("ID=**********");
+    expect(sanitize("id = 1023456789")).toBe("id = **********");
+    expect(sanitize("id:1023456789")).toBe("id:**********");
+    expect(sanitize("id : 1023456789")).toBe("id : **********");
+    expect(sanitize("ID : 1023456789")).toBe("ID : **********");
+    expect(sanitize("ID: 1023456789")).toBe("ID: **********");
+    expect(sanitize("id: 1023456789")).toBe("id: **********");
+  });
+
   test("does not treat plain 'order id' as a labeled secret", () => {
     expect(
       detectSecrets("order id 966512345678901234").some(

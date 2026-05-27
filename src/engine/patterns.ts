@@ -70,8 +70,11 @@ const PATTERNS: Record<string, PatternConfig> = {
 const PASSWORD_VALUE_PATTERN =
   /(?:passw(?:ord)?)\s*(?:is|:|=|>|<)\s*["']?([^\s"']+)["']?/gi;
 
+const LABELED_ID_10_PATTERN =
+  /\bID\b\s*(?:is|:|=|>|<)\s*["']?(\d{10})["']?/gi;
+
 const LABELED_SECRET_PATTERN =
-  /(?:[\w-]+(?:[\s_-]+)*KEY|[\w-]+_ID)\s*(?:is|:|=|>|<)\s*["']?([^\s"']+)["']?/gi;
+  /(?:\bKEY\b|[\w-]+(?:[\s_-]+)*KEY|[\w-]+_ID)\s*(?:is|:|=|>|<)\s*["']?([^\s"']+)["']?/gi;
 
 const PHONE_TYPES = new Set([
   "saudiPhonePlus",
@@ -102,7 +105,12 @@ function maskDetection(
     return "";
   }
 
-  if (config?.preserveLengthMask || detection.type === "password" || detection.type === "labeledSecret") {
+  if (
+    config?.preserveLengthMask ||
+    detection.type === "password" ||
+    detection.type === "labeledSecret" ||
+    detection.type === "labeledId"
+  ) {
     return "*".repeat(detection.text.length);
   }
 
@@ -206,6 +214,9 @@ export function detectSecrets(text: string): Detection[] {
   );
   detections.push(
     ...detectValueAfterLabel(text, LABELED_SECRET_PATTERN, "labeledSecret", 0.88),
+  );
+  detections.push(
+    ...detectValueAfterLabel(text, LABELED_ID_10_PATTERN, "labeledId", 0.9),
   );
 
   return dedupeDetections(detections);
