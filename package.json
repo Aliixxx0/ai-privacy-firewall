@@ -11,6 +11,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "lucide-react": "^1.16.0",
     "plasmo": "0.90.5",
     "react": "18.2.0",
     "react-dom": "18.2.0",
@@ -22,17 +23,20 @@
     "@types/node": "20.11.5",
     "@types/react": "18.2.48",
     "@types/react-dom": "18.2.18",
+    "autoprefixer": "^10.5.0",
+    "postcss": "^8.5.15",
     "prettier": "3.2.4",
+    "tailwindcss": "^4.3.0",
     "typescript": "5.3.3"
   },
-"manifest": {
-  "host_permissions": [
-    "https://chat.openai.com/*",
-    "https://chatgpt.com/*",
-    "https://claude.ai/*",
-    "https://gemini.google.com/*",
-    "https://*/*"
-  ],
-  "permissions": ["activeTab", "storage"]
-}
+  "manifest": {
+    "host_permissions": [
+      "https://chat.openai.com/*",
+      "https://chatgpt.com/*",
+      "https://claude.ai/*",
+      "https://gemini.google.com/*",
+      "https://*/*"
+    ],
+    "permissions": ["activeTab", "storage"]
+  }
 }
