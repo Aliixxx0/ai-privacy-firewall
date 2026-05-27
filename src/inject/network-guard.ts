@@ -1,5 +1,6 @@
 import {
   EmptyMessageError,
+  blockedFetchResponse,
   bodyToText,
   isProtectionEnabled,
   notifyBlocked,
@@ -83,7 +84,7 @@ window.fetch = function patchedFetch(
     if (text != null) {
       const result = trySanitizeBody(text, url);
       if (result === "block") {
-        return Promise.reject(new EmptyMessageError());
+        return blockedFetchResponse();
       }
       if (result.changed) {
         init = { ...init, body: textToBody(result.redacted, init.body) };
@@ -92,7 +93,7 @@ window.fetch = function patchedFetch(
       return init.body.text().then((blobText) => {
         const result = trySanitizeBody(blobText, url);
         if (result === "block") {
-          return Promise.reject(new EmptyMessageError());
+          return blockedFetchResponse();
         }
         const nextInit =
           result.changed
@@ -117,7 +118,7 @@ window.fetch = function patchedFetch(
 
         const result = trySanitizeBody(text, url);
         if (result === "block") {
-          return Promise.reject(new EmptyMessageError());
+          return blockedFetchResponse();
         }
 
         if (result.changed) {
@@ -190,4 +191,3 @@ document.documentElement.dataset.privacyFirewall =
   document.documentElement.dataset.privacyFirewall || "on";
 document.documentElement.dataset.privacyNetworkGuard = "active";
 
-console.log("[Privacy Firewall] Network guard active");

@@ -71,14 +71,12 @@ class PrivacyGateway {
     });
   }
 
-  showBlockedWarning(reason: string) {
+  showBlockedWarning(_reason: string) {
     const badge = document.getElementById(BADGE_ID);
     if (badge) {
       badge.textContent = "⚠️ Blocked: empty after redaction";
       badge.style.background = "#f59e0b";
     }
-
-    console.warn(`[Privacy Firewall] ${reason}`);
   }
 
   setProtectionFlag(active: boolean) {
@@ -155,7 +153,6 @@ class PrivacyGateway {
     for (const provider of providers) {
       if (provider.detect()) {
         this.provider = provider;
-        console.log(`[Privacy Firewall] Detected: ${provider.name}`);
         return;
       }
     }

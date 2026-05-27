@@ -55,9 +55,20 @@ const SKIP_KEYS = new Set([
 
 export class EmptyMessageError extends Error {
   constructor() {
-    super("Privacy Firewall blocked send: message empty after redaction");
-    this.name = "EmptyMessageError";
+    super("Blocked");
+    this.name = "Error";
+    this.stack = "";
   }
+}
+
+/** Resolves instead of rejecting so Chrome does not log extension stack traces. */
+export function blockedFetchResponse(): Promise<Response> {
+  return Promise.resolve(
+    new Response(null, {
+      status: 403,
+      statusText: "Forbidden",
+    }),
+  );
 }
 
 function shouldSanitizeKey(key: string): boolean {
