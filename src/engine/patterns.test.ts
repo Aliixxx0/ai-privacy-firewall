@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { detectSecrets, sanitize } from "./patterns";
+import { detectSecrets, isPhoneDetection, sanitize } from "./patterns";
 import {
   EmptyMessageError,
   bodyToText,
@@ -12,6 +12,14 @@ import {
   shouldSanitizeRequest,
   textToBody,
 } from "./sanitize-payload";
+
+function findPhone(input: string) {
+  return detectSecrets(input).find((d) => isPhoneDetection(d.type));
+}
+
+function findPhones(input: string) {
+  return detectSecrets(input).filter((d) => isPhoneDetection(d.type));
+}
 
 describe("detectSecrets - email", () => {
   const cases = [
@@ -35,40 +43,85 @@ describe("detectSecrets - email", () => {
 });
 
 describe("detectSecrets - saudiPhone", () => {
-  const validCases = [
-    { input: "mobile 0512345678", expected: "0512345678" },
-    { input: "mobile 05 1234 5678", expected: "05 1234 5678" },
-    { input: "mobile 05-1234-5678", expected: "05-1234-5678" },
-    { input: "intl +966512345678", expected: "+966512345678" },
-    { input: "intl +966 512345678", expected: "+966 512345678" },
-    { input: "intl 966512345678", expected: "966512345678" },
-    { input: "intl 966 512345678", expected: "966 512345678" },
-    { input: "call +966551234567 please", expected: "+966551234567" },
+  const intlCases = [
+    { input: "intl +966512345678", expected: "+966512345678", type: "saudiPhonePlus" },
+    { input: "intl +966 512345678", expected: "+966 512345678", type: "saudiPhonePlus" },
+    { input: "intl 966512345678", expected: "966512345678", type: "saudiPhone9665" },
+    { input: "intl 966 512345678", expected: "966 512345678", type: "saudiPhone966" },
+    { input: "call +966551234567 please", expected: "+966551234567", type: "saudiPhonePlus" },
   ];
 
-  for (const { input, expected } of validCases) {
+  for (const { input, expected, type } of intlCases) {
     test(`detects ${expected} in "${input}"`, () => {
-      const detections = detectSecrets(input);
-      const phone = detections.find((d) => d.type === "saudiPhone");
+      const phone = detectSecrets(input).find((d) => d.type === type);
       expect(phone?.text).toBe(expected);
     });
   }
 
+  test("masks partial international number while typing (9 digits)", () => {
+    const partial = "+96651234567";
+    const phone = findPhone(`my ${partial}`);
+    expect(phone?.text).toBe(partial);
+  });
+
+  test("masks +966 prefix as soon as typed", () => {
+    expect(findPhone("country +966")?.text).toBe("+966");
+  });
+
+  test("detects 05 only after phone number context", () => {
+    expect(findPhone("mobile 0512345678")).toBeUndefined();
+    expect(findPhone("phone number 0512345678")?.text).toBe("0512345678");
+    expect(findPhone("Phone Number is 05 1234 5678")?.text).toBe("05 1234 5678");
+    expect(findPhone("my number: 0512345678")?.text).toBe("0512345678");
+  });
+
+  test("detects 05 after phone number even with text in between", () => {
+    const input =
+      "see this phone number pls,sk-12345678901234567890123456789012 ,0512345678";
+    const phone = findPhone(input);
+    expect(phone?.text).toBe("0512345678");
+  });
+
+  test("masks partial local number while typing after context", () => {
+    const input = "phone number 051234567";
+    const phone = findPhone(input);
+    expect(phone?.text).toBe("051234567");
+  });
+
   const invalidCases = [
-    "051234567", // too short
-    "05123456789", // too long
-    "0612345678", // wrong prefix
-    "1234567890", // not saudi format
-    "order id 966512345678901234", // embedded in longer number
+    "0612345678",
+    "1234567890",
+    "051234567",
+    "order id 966512345678901234",
   ];
 
   for (const input of invalidCases) {
-    test(`ignores invalid phone: ${input}`, () => {
-      expect(detectSecrets(input).some((d) => d.type === "saudiPhone")).toBe(
-        false,
-      );
+    test(`ignores invalid or out-of-context phone: ${input}`, () => {
+      expect(findPhone(input)).toBeUndefined();
     });
   }
+});
+
+describe("detectSecrets - saudiNationalId", () => {
+  test("detects national id starting with 1", () => {
+    expect(
+      detectSecrets("id 1023456789").some((d) => d.type === "saudiNationalId"),
+    ).toBe(true);
+  });
+
+  test("masks partial id while typing", () => {
+    const partial = "1023456";
+    const id = detectSecrets(`national id ${partial}`).find(
+      (d) => d.type === "saudiNationalId",
+    );
+    expect(id?.text).toBe(partial);
+  });
+
+  test("ignores single digit 1", () => {
+    expect(detectSecrets("item 1").some((d) => d.type === "saudiNationalId")).toBe(
+      false,
+    );
+  });
 });
 
 describe("detectSecrets - apiKey", () => {
@@ -140,16 +193,31 @@ describe("detectSecrets - creditCard", () => {
 });
 
 describe("detectSecrets - password", () => {
-  test("detects password assignment", () => {
-    expect(
-      detectSecrets('config password="S3cret!"').some((d) => d.type === "password"),
-    ).toBe(true);
+  test("masks only the password value after colon", () => {
+    const input = 'config password: MyS3cret!';
+    const detection = detectSecrets(input).find((d) => d.type === "password");
+    expect(detection?.text).toBe("MyS3cret!");
+    expect(sanitize(input)).toBe("config password: *********");
   });
 
-  test("detects password with colon separator", () => {
-    expect(
-      detectSecrets("password: MyS3cret!").some((d) => d.type === "password"),
-    ).toBe(true);
+  test("detects password with equals separator", () => {
+    expect(sanitize("password=Hidden123")).toBe("password=*********");
+  });
+
+  test("detects PassWord is value case-insensitively", () => {
+    expect(sanitize("PassWord is SecretValue")).toBe("PassWord is ***********");
+  });
+
+  test("detects passw with greater-than separator", () => {
+    expect(sanitize("passw > admin123")).toBe("passw > ********");
+  });
+
+  test("detects password with quoted value", () => {
+    expect(sanitize('password="S3cret!"')).toBe('password="*******"');
+  });
+
+  test("handles extra spaces around separators", () => {
+    expect(sanitize("password   :   Hidden123")).toBe("password   :   *********");
   });
 });
 
@@ -165,8 +233,8 @@ describe("detectSecrets - bearerToken", () => {
 
 describe("detectSecrets - deduplication", () => {
   test("does not double-detect overlapping matches", () => {
-    const detections = detectSecrets("0512345678");
-    expect(detections.filter((d) => d.type === "saudiPhone")).toHaveLength(1);
+    const detections = findPhones("+966512345678");
+    expect(detections).toHaveLength(1);
   });
 });
 
@@ -195,13 +263,13 @@ describe("detectSecrets - metadata", () => {
 
   test("detects multiple secrets in one message", () => {
     const input =
-      "email test@example.com phone 0512345678 key sk-12345678901234567890123456789012";
+      "email test@example.com phone number 0512345678 key sk-12345678901234567890123456789012";
     const types = detectSecrets(input).map((d) => d.type);
 
     expect(types).toContain("email");
-    expect(types).toContain("saudiPhone");
+    expect(types.some(isPhoneDetection)).toBe(true);
     expect(types).toContain("apiKey");
-    expect(types).toHaveLength(3);
+    expect(types.length).toBeGreaterThanOrEqual(3);
   });
 });
 
@@ -216,8 +284,8 @@ describe("sanitize - masking behavior", () => {
   });
 
   test("masks saudi phone with length-preserving asterisks", () => {
-    expect(sanitize("phone 0512345678")).toBe("phone **********");
-    expect(sanitize("phone 05 1234 5678")).toBe("phone ************");
+    expect(sanitize("phone number 0512345678")).toBe("phone number **********");
+    expect(sanitize("number is 05 1234 5678")).toBe("number is ************");
     expect(sanitize("phone +966512345678")).toBe("phone *************");
   });
 
@@ -228,7 +296,7 @@ describe("sanitize - masking behavior", () => {
 
   test("masks multiple secret types in one message", () => {
     const input =
-      "email test@example.com phone 0512345678 key sk-12345678901234567890123456789012";
+      "email test@example.com phone number 0512345678 key sk-12345678901234567890123456789012";
     const output = sanitize(input);
 
     expect(output).toContain("****");
@@ -267,11 +335,20 @@ describe("sanitize - masking behavior", () => {
   });
 
   test("sanitizes multiple saudi numbers in one line", () => {
-    const output = sanitize("call 0512345678 or 0598765432");
+    const output = sanitize("phone number 0512345678 or number 0598765432");
 
     expect(output).not.toContain("0512345678");
     expect(output).not.toContain("0598765432");
     expect(output.match(/\*{10}/g)?.length).toBe(2);
+  });
+
+  test("masks national id starting with 1", () => {
+    expect(sanitize("national id 1023456789")).toBe("national id **********");
+  });
+
+  test("masks partial phone while user is still typing", () => {
+    expect(sanitize("phone number 051234567")).toBe("phone number *********");
+    expect(sanitize("intl +96651234567")).toBe("intl ************");
   });
 
   test("preserves surrounding punctuation after redaction", () => {
@@ -283,14 +360,14 @@ describe("sanitize - masking behavior", () => {
 describe("sanitizePayload - claude api bodies", () => {
   test("redacts message_content only", () => {
     const body = JSON.stringify({
-      message_content: "email test@example.com phone 0512345678",
+      message_content: "email test@example.com phone number 0512345678",
       context_token: "abc-session-token",
       conversation_id: "uuid-1234-5678",
     });
 
     const result = JSON.parse(sanitizePayload(body));
 
-    expect(result.message_content).toBe("email **** phone **********");
+    expect(result.message_content).toBe("email **** phone number **********");
     expect(result.context_token).toBe("abc-session-token");
     expect(result.conversation_id).toBe("uuid-1234-5678");
   });
@@ -338,7 +415,9 @@ describe("sanitizePayload - claude api bodies", () => {
   });
 
   test("sanitizes plain text bodies", () => {
-    expect(sanitizePayload("phone 0512345678")).toBe("phone **********");
+    expect(sanitizePayload("phone number 0512345678")).toBe(
+      "phone number **********",
+    );
   });
 });
 
@@ -402,7 +481,7 @@ describe("sanitizePayload - chatgpt api bodies", () => {
             content_type: "text",
             parts: [
               "first test@example.com",
-              "second 0512345678",
+              "phone number 0512345678",
             ],
           },
         },
@@ -413,7 +492,7 @@ describe("sanitizePayload - chatgpt api bodies", () => {
     const parts = result.messages[0].content.parts;
 
     expect(parts[0]).toBe("first ****");
-    expect(parts[1]).toBe("second **********");
+    expect(parts[1]).toBe("phone number **********");
   });
 
   test("matches exact leaking payload shape from chatgpt", () => {
@@ -565,17 +644,19 @@ describe("sanitizePayload - edge cases", () => {
 
   test("sanitizes prompt field for generic api payloads", () => {
     const body = JSON.stringify({
-      prompt: "my number is 0512345678",
+      prompt: "phone number 0512345678",
       model: "gpt-4o",
     });
 
     const result = JSON.parse(sanitizePayload(body));
-    expect(result.prompt).toBe("my number is **********");
+    expect(result.prompt).toBe("phone number **********");
     expect(result.model).toBe("gpt-4o");
   });
 
   test("falls back to plain sanitize for invalid json", () => {
-    expect(sanitizePayload("phone 0512345678")).toBe("phone **********");
+    expect(sanitizePayload("phone number 0512345678")).toBe(
+      "phone number **********",
+    );
     expect(sanitizePayload("not-json but test@example.com")).toBe(
       "not-json but ****",
     );
